@@ -1,0 +1,25 @@
+{
+  "name": "parlaycity",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter web dev",
+    "build": "pnpm --filter web build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test:contracts": "cd packages/contracts && forge test",
+    "test:web": "pnpm --filter web test",
+    "test:services": "pnpm --filter services test",
+    "test": "pnpm test:contracts && pnpm test:web && pnpm test:services"
+  },
+  "pnpm": {
+    "overrides": {
+      "wagmi": "^2.14.0",
+      "viem": "^2.21.0",
+      "@tanstack/react-query": "^5.62.0"
+    }
+  },
+  "engines": {
+    "node": ">=18",
+    "pnpm": ">=8"
+  }
+}
