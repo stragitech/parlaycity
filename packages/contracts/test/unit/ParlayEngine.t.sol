@@ -6,6 +6,7 @@ import {MockUSDC} from "../../src/MockUSDC.sol";
 import {HouseVault} from "../../src/core/HouseVault.sol";
 import {LegRegistry} from "../../src/core/LegRegistry.sol";
 import {ParlayEngine} from "../../src/core/ParlayEngine.sol";
+import {LockVault} from "../../src/core/LockVault.sol";
 import {AdminOracleAdapter} from "../../src/oracle/AdminOracleAdapter.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {LegStatus} from "../../src/interfaces/IOracleAdapter.sol";
@@ -34,6 +35,12 @@ contract ParlayEngineTest is Test {
         engine = new ParlayEngine(vault, registry, IERC20(address(usdc)), BOOTSTRAP_ENDS);
 
         vault.setEngine(address(engine));
+
+        // Wire fee routing (required for buyTicket)
+        LockVault lockVault = new LockVault(vault);
+        vault.setLockVault(lockVault);
+        vault.setSafetyModule(makeAddr("safetyModule"));
+        lockVault.setFeeDistributor(address(vault));
 
         // Seed vault with liquidity
         usdc.mint(owner, 10_000e6);
@@ -100,8 +107,10 @@ contract ParlayEngineTest is Test {
         outcomes[1] = keccak256("yes");
 
         // Need to re-create legs since cutoff must be in the future
-        uint256 leg0 = registry.createLeg("Q1", "s", block.timestamp + 1000, block.timestamp + 2000, address(oracle), 500_000);
-        uint256 leg1 = registry.createLeg("Q2", "s", block.timestamp + 1000, block.timestamp + 2000, address(oracle), 250_000);
+        uint256 leg0 =
+            registry.createLeg("Q1", "s", block.timestamp + 1000, block.timestamp + 2000, address(oracle), 500_000);
+        uint256 leg1 =
+            registry.createLeg("Q2", "s", block.timestamp + 1000, block.timestamp + 2000, address(oracle), 250_000);
 
         uint256[] memory newLegs = new uint256[](2);
         newLegs[0] = leg0;
@@ -551,9 +560,15 @@ contract ParlayEngineTest is Test {
         uint256 h4 = _createLeg("H4", 700_000);
 
         uint256[] memory legs = new uint256[](5);
-        legs[0] = h0; legs[1] = h1; legs[2] = h2; legs[3] = h3; legs[4] = h4;
+        legs[0] = h0;
+        legs[1] = h1;
+        legs[2] = h2;
+        legs[3] = h3;
+        legs[4] = h4;
         bytes32[] memory outcomes = new bytes32[](5);
-        for (uint256 i = 0; i < 5; i++) outcomes[i] = keccak256("yes");
+        for (uint256 i = 0; i < 5; i++) {
+            outcomes[i] = keccak256("yes");
+        }
 
         vm.prank(alice);
         uint256 ticketId = engine.buyTicket(legs, outcomes, 10e6);
