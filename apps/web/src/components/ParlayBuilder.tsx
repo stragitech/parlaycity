@@ -105,6 +105,19 @@ export function ParlayBuilder() {
 
   const vaultEmpty = mounted && freeLiquidity !== undefined && freeLiquidity === 0n;
 
+  function buyButtonLabel(): string {
+    if (!mounted || !isConnected) return "Connect Wallet";
+    if (isPending) return "Waiting for approval...";
+    if (isConfirming) return "Confirming...";
+    if (isSuccess) return "Ticket Bought!";
+    if (vaultEmpty) return "No Vault Liquidity";
+    if (selectedLegs.length < PARLAY_CONFIG.minLegs) return `Select at least ${PARLAY_CONFIG.minLegs} legs`;
+    if (insufficientBalance) return "Insufficient USDC Balance";
+    if (exceedsMaxPayout) return `Max Payout $${maxPayoutNum.toFixed(0)}`;
+    if (insufficientLiquidity) return "Insufficient Vault Liquidity";
+    return "Buy Ticket";
+  }
+
   return (
     <div className={`grid gap-8 lg:grid-cols-5 transition-opacity duration-300 ${mounted ? "opacity-100" : "pointer-events-none opacity-50"}`}>
       {/* Leg selector */}
@@ -120,7 +133,7 @@ export function ParlayBuilder() {
             ({selectedLegs.length}/{effectiveMaxLegs})
           </span>
         </h2>
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className={`grid gap-3 sm:grid-cols-2 ${vaultEmpty ? "pointer-events-none opacity-40" : ""}`}>
           {MOCK_LEGS.map((leg) => {
             const selected = selectedLegs.find((s) => s.leg.id === leg.id);
             return (
@@ -137,6 +150,7 @@ export function ParlayBuilder() {
                 </p>
                 <div className="flex items-center gap-2">
                   <button
+                    disabled={vaultEmpty}
                     onClick={() => toggleLeg(leg, 1)}
                     className={`flex flex-1 items-center justify-between rounded-lg px-3 py-2 text-xs font-semibold transition-all ${
                       selected?.outcomeChoice === 1
@@ -148,6 +162,7 @@ export function ParlayBuilder() {
                     <span className="ml-1 tabular-nums opacity-70">{effectiveOdds(leg, 1).toFixed(2)}x</span>
                   </button>
                   <button
+                    disabled={vaultEmpty}
                     onClick={() => toggleLeg(leg, 2)}
                     className={`flex flex-1 items-center justify-between rounded-lg px-3 py-2 text-xs font-semibold transition-all ${
                       selected?.outcomeChoice === 2
@@ -267,32 +282,16 @@ export function ParlayBuilder() {
           {/* Buy button */}
           <button
             onClick={!mounted || !isConnected ? () => openConnectModal(true) : handleBuy}
-            disabled={mounted && isConnected && (!canBuy || isPending || isConfirming)}
+            disabled={mounted && isConnected && (!canBuy || vaultEmpty || isPending || isConfirming)}
             className={`w-full rounded-xl py-3.5 text-sm font-bold uppercase tracking-wider transition-all ${
               !mounted || !isConnected
                 ? "bg-gradient-to-r from-accent-blue to-accent-purple text-white shadow-lg shadow-accent-purple/20 hover:shadow-accent-purple/40"
-                : canBuy && !isPending && !isConfirming
+                : canBuy && !vaultEmpty && !isPending && !isConfirming
                   ? "bg-gradient-to-r from-accent-blue to-accent-purple text-white shadow-lg shadow-accent-purple/20 hover:shadow-accent-purple/40"
                   : "cursor-not-allowed bg-gray-800 text-gray-500"
             }`}
           >
-            {!mounted || !isConnected
-              ? "Connect Wallet"
-              : selectedLegs.length < PARLAY_CONFIG.minLegs
-                ? `Select at least ${PARLAY_CONFIG.minLegs} legs`
-                : insufficientBalance
-                  ? "Insufficient USDC Balance"
-                  : exceedsMaxPayout
-                    ? `Max Payout $${maxPayoutNum.toFixed(0)}`
-                    : insufficientLiquidity
-                      ? "Insufficient Vault Liquidity"
-                      : isPending
-                        ? "Waiting for approval..."
-                        : isConfirming
-                          ? "Confirming..."
-                          : isSuccess
-                            ? "Ticket Bought!"
-                            : "Buy Ticket"}
+            {buyButtonLabel()}
           </button>
 
           {/* Tx feedback */}
