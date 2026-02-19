@@ -21,6 +21,17 @@ contract ParlayMathWrapper {
     function computeEdge(uint256 numLegs, uint256 baseBps, uint256 perLegBps) external pure returns (uint256) {
         return ParlayMath.computeEdge(numLegs, baseBps, perLegBps);
     }
+
+    function computeCashoutValue(
+        uint256 effectiveStake,
+        uint256[] memory wonProbsPPM,
+        uint256 unresolvedCount,
+        uint256 basePenaltyBps,
+        uint256 totalLegs,
+        uint256 potentialPayout
+    ) external pure returns (uint256, uint256) {
+        return ParlayMath.computeCashoutValue(effectiveStake, wonProbsPPM, unresolvedCount, basePenaltyBps, totalLegs, potentialPayout);
+    }
 }
 
 contract ParlayMathTest is Test {
@@ -87,6 +98,63 @@ contract ParlayMathTest is Test {
         wrapper.computeMultiplier(probs);
     }
 
+    // ── computeMultiplier parity (non-round inputs) ─────────────────────
+    // These values serve as reference for the TS mirror. Any change here
+    // must be reflected in packages/services/test/quote.test.ts.
+
+    function test_computeMultiplier_nonRound_threeLegs() public pure {
+        // 60% / 40% / 50% — intermediate truncation matters
+        uint256[] memory probs = new uint256[](3);
+        probs[0] = 600_000;
+        probs[1] = 400_000;
+        probs[2] = 500_000;
+        // m = 1e6 -> 1e12/600000=1666666 -> 1666666e6/400000=4166665 -> 4166665e6/500000=8333330
+        assertEq(ParlayMath.computeMultiplier(probs), 8_333_330);
+    }
+
+    function test_computeMultiplier_nonRound_twoLegs() public pure {
+        // 333_333 (~33.3%) / 666_667 (~66.7%)
+        uint256[] memory probs = new uint256[](2);
+        probs[0] = 333_333;
+        probs[1] = 666_667;
+        assertEq(ParlayMath.computeMultiplier(probs), 4_500_002);
+    }
+
+    function test_computeMultiplier_nonRound_fourLegs() public pure {
+        // 700_000 / 300_000 / 800_000 / 450_000
+        uint256[] memory probs = new uint256[](4);
+        probs[0] = 700_000;
+        probs[1] = 300_000;
+        probs[2] = 800_000;
+        probs[3] = 450_000;
+        uint256 mult = ParlayMath.computeMultiplier(probs);
+        // m = 1e6 -> 1428571 -> 4761903 -> 5952378 -> 13227506
+        assertEq(mult, 13_227_506);
+    }
+
+    function test_computeMultiplier_nonRound_fiveLegs() public pure {
+        // 550_000 / 350_000 / 650_000 / 420_000 / 780_000
+        uint256[] memory probs = new uint256[](5);
+        probs[0] = 550_000;
+        probs[1] = 350_000;
+        probs[2] = 650_000;
+        probs[3] = 420_000;
+        probs[4] = 780_000;
+        uint256 mult = ParlayMath.computeMultiplier(probs);
+        assertEq(mult, 24_395_612);
+    }
+
+    function test_computeCashoutValue_nonRound_penalty() public pure {
+        // penaltyBps = basePenaltyBps * unresolvedCount / totalLegs
+        // 1500 * 2 / 7 = 428 (truncated from 428.57...)
+        uint256[] memory wonProbs = new uint256[](1);
+        wonProbs[0] = 500_000;
+        (, uint256 penaltyBps) = ParlayMath.computeCashoutValue(
+            10e6, wonProbs, 2, 1500, 7, type(uint128).max
+        );
+        assertEq(penaltyBps, 428);
+    }
+
     // ── applyEdge ────────────────────────────────────────────────────────
 
     function test_applyEdge_200bps() public pure {
@@ -140,5 +208,28 @@ contract ParlayMathTest is Test {
     function test_computeEdge_zeroLegs() public pure {
         uint256 edge = ParlayMath.computeEdge(0, 100, 50);
         assertEq(edge, 100);
+    }
+
+    // ── computeCashoutValue input validation ──────────────────────────────
+
+    function test_cashout_revertsOnZeroTotalLegs() public {
+        uint256[] memory wonProbs = new uint256[](1);
+        wonProbs[0] = 500_000;
+        vm.expectRevert("ParlayMath: zero totalLegs");
+        wrapper.computeCashoutValue(10e6, wonProbs, 1, 1500, 0, type(uint128).max);
+    }
+
+    function test_cashout_revertsOnUnresolvedExceedsTotal() public {
+        uint256[] memory wonProbs = new uint256[](1);
+        wonProbs[0] = 500_000;
+        vm.expectRevert("ParlayMath: unresolved > total");
+        wrapper.computeCashoutValue(10e6, wonProbs, 5, 1500, 3, type(uint128).max);
+    }
+
+    function test_cashout_revertsOnPenaltyAboveBPS() public {
+        uint256[] memory wonProbs = new uint256[](1);
+        wonProbs[0] = 500_000;
+        vm.expectRevert("ParlayMath: penalty > 100%");
+        wrapper.computeCashoutValue(10e6, wonProbs, 1, 10_001, 2, type(uint128).max);
     }
 }

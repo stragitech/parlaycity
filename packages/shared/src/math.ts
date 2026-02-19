@@ -3,6 +3,7 @@ import {
   BPS,
   BASE_FEE_BPS,
   PER_LEG_FEE_BPS,
+  BASE_CASHOUT_PENALTY_BPS,
   USDC_DECIMALS,
   MIN_LEGS,
   MAX_LEGS,
@@ -12,25 +13,22 @@ import type { QuoteResponse } from "./types.js";
 
 /**
  * Multiply probabilities (each in PPM) to get combined fair multiplier in x1e6.
- * multiplier = PPM^n / product(probs)
- * This mirrors ParlayMath.sol: combined probability = p1*p2*...*pn / PPM^(n-1),
- * multiplier = PPM / combinedProbability = PPM^n / product(probs).
+ * Iterative division mirrors ParlayMath.sol exactly:
+ * multiplier = PPM; multiplier = multiplier * PPM / prob_i for each leg.
  */
 export function computeMultiplier(probsPPM: number[]): bigint {
-  const ppm = BigInt(PPM);
-  let numerator = 1n;
-  let denominator = 1n;
-  for (const p of probsPPM) {
-    numerator *= ppm;
-    denominator *= BigInt(p);
+  if (probsPPM.length === 0) {
+    throw new Error("computeMultiplier: empty probs");
   }
-  // Result is in x1e6 (same scale as PPM)
-  // multiplierX1e6 = (PPM^n * PPM) / product(probs)
-  // Actually: fair multiplier = 1/combinedProb, expressed in x1e6
-  // combinedProb = product(probs) / PPM^(n-1)
-  // multiplier = 1/combinedProb = PPM^(n-1) / product(probs), but we want x1e6 output
-  // multiplierX1e6 = PPM^n / product(probs)
-  return (numerator * ppm) / denominator;
+  const ppm = BigInt(PPM);
+  let multiplier = ppm; // start at 1x (1_000_000)
+  for (const p of probsPPM) {
+    if (p <= 0 || p > PPM) {
+      throw new Error("computeMultiplier: prob out of range");
+    }
+    multiplier = (multiplier * ppm) / BigInt(p);
+  }
+  return multiplier;
 }
 
 /**
@@ -105,6 +103,80 @@ export function computeQuote(
     probabilities: legProbsPPM,
     valid: true,
   };
+}
+
+/**
+ * Compute progressive payout: partial claim based on won legs.
+ * Returns the total partial payout and the new claimable amount.
+ */
+export function computeProgressivePayout(
+  effectiveStake: bigint,
+  wonProbsPPM: number[],
+  potentialPayout: bigint,
+  alreadyClaimed: bigint
+): { partialPayout: bigint; claimable: bigint } {
+  if (wonProbsPPM.length === 0) {
+    throw new Error("computeProgressivePayout: no won legs");
+  }
+  const partialMultiplier = computeMultiplier(wonProbsPPM);
+  let partialPayout = computePayout(effectiveStake, partialMultiplier);
+  if (partialPayout > potentialPayout) partialPayout = potentialPayout;
+  const claimable = partialPayout > alreadyClaimed ? partialPayout - alreadyClaimed : 0n;
+  return { partialPayout, claimable };
+}
+
+/**
+ * Compute cashout value for an early exit.
+ * fairValue = wonValue (expected value given won legs; unresolved risk priced via penalty)
+ * penaltyBps = basePenaltyBps * unresolvedCount / totalLegs
+ * cashoutValue = fairValue * (BPS - penaltyBps) / BPS
+ */
+export function computeCashoutValue(
+  effectiveStake: bigint,
+  wonProbsPPM: number[],
+  unresolvedCount: number,
+  totalLegs: number,
+  potentialPayout: bigint,
+  basePenaltyBps: number = BASE_CASHOUT_PENALTY_BPS,
+): { cashoutValue: bigint; penaltyBps: number; fairValue: bigint } {
+  if (wonProbsPPM.length === 0) {
+    throw new Error("computeCashoutValue: no won legs");
+  }
+  if (totalLegs <= 0) {
+    throw new Error("computeCashoutValue: zero totalLegs");
+  }
+  if (unresolvedCount <= 0) {
+    throw new Error("computeCashoutValue: no unresolved legs");
+  }
+  if (unresolvedCount > totalLegs) {
+    throw new Error("computeCashoutValue: unresolved > total");
+  }
+  if (basePenaltyBps < 0 || basePenaltyBps > BPS) {
+    throw new Error("computeCashoutValue: penalty out of range");
+  }
+
+  const bps = BigInt(BPS);
+
+  // Fair value = expected payout given won legs.
+  // wonMultiplier = 1/product(wonProbs) in PPM; wonValue = stake / product(wonProbs).
+  // This already equals Prob(unresolved win) × fullPayout because the unresolved
+  // probabilities cancel out when deriving EV from won legs alone.
+  // The penalty (below) prices in the risk of unresolved legs.
+  const wonMultiplier = computeMultiplier(wonProbsPPM);
+  const fairValue = computePayout(effectiveStake, wonMultiplier);
+
+  // Scaled penalty
+  const penaltyBps = Number(
+    (BigInt(basePenaltyBps) * BigInt(unresolvedCount)) / BigInt(totalLegs),
+  );
+  let cashoutValue = (fairValue * (bps - BigInt(penaltyBps))) / bps;
+
+  // Cap at potential payout
+  if (cashoutValue > potentialPayout) {
+    cashoutValue = potentialPayout;
+  }
+
+  return { cashoutValue, penaltyBps, fairValue };
 }
 
 function invalidQuote(

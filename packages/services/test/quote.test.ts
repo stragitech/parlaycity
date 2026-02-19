@@ -5,6 +5,8 @@ import {
   applyEdge,
   computePayout,
   computeQuote,
+  computeProgressivePayout,
+  computeCashoutValue,
   parseUSDC,
   formatUSDC,
   parseQuoteRequest,
@@ -27,14 +29,10 @@ describe("computeMultiplier", () => {
     expect(result).toBe(4_000_000n);
   });
 
-  it("returns correct multiplier for three legs", () => {
-    // 60% * 40% * 50% = 0.12 => multiplier = 8.333...
-    // In PPM: 600000 * 400000 * 500000
-    // numerator = PPM^3 * PPM = PPM^4
-    // denominator = 600000 * 400000 * 500000
+  it("returns correct multiplier for three legs (iterative truncation)", () => {
+    // Mirrors ParlayMath.sol iterative: m = 1e6 -> 1e12/600000=1666666 -> 1666666e6/400000=4166665 -> 4166665e6/500000=8333330
     const result = computeMultiplier([600_000, 400_000, 500_000]);
-    // 1 / (0.6 * 0.4 * 0.5) = 1/0.12 = 8.333... => 8_333_333n (truncated)
-    expect(result).toBe(8_333_333n);
+    expect(result).toBe(8_333_330n);
   });
 
   it("handles high-probability legs", () => {
@@ -138,18 +136,51 @@ describe("computeQuote", () => {
   });
 });
 
-describe("computeMultiplier boundary cases", () => {
+describe("computeMultiplier Solidity parity", () => {
+  // Reference values from ParlayMath.t.sol — must match exactly.
+  // These catch TS/Solidity divergence from iterative truncation.
+
+  it("non-round two legs: 333_333 / 666_667", () => {
+    expect(computeMultiplier([333_333, 666_667])).toBe(4_500_002n);
+  });
+
+  it("non-round three legs: 600_000 / 400_000 / 500_000", () => {
+    expect(computeMultiplier([600_000, 400_000, 500_000])).toBe(8_333_330n);
+  });
+
+  it("non-round four legs: 700_000 / 300_000 / 800_000 / 450_000", () => {
+    expect(computeMultiplier([700_000, 300_000, 800_000, 450_000])).toBe(13_227_506n);
+  });
+
+  it("non-round five legs: 550_000 / 350_000 / 650_000 / 420_000 / 780_000", () => {
+    expect(computeMultiplier([550_000, 350_000, 650_000, 420_000, 780_000])).toBe(24_395_612n);
+  });
+
   it("handles lowest valid probability (1 PPM)", () => {
     const result = computeMultiplier([1, 1]);
-    // TS impl: PPM^n * PPM / product(probs) = 1e6^2 * 1e6 / (1*1) = 1e18
     expect(result).toBe(1_000_000_000_000_000_000n);
   });
 
   it("handles near-maximum probability (999_999 PPM)", () => {
     const result = computeMultiplier([999_999, 999_999]);
-    // Just slightly above 1x
-    expect(result).toBeGreaterThanOrEqual(1_000_000n);
-    expect(result).toBeLessThan(1_000_003n);
+    expect(result).toBe(1_000_002n);
+  });
+
+  // Input validation — mirrors ParlayMath.sol require guards
+  it("throws on empty probs", () => {
+    expect(() => computeMultiplier([])).toThrow("empty probs");
+  });
+
+  it("throws on zero probability", () => {
+    expect(() => computeMultiplier([0, 500_000])).toThrow("prob out of range");
+  });
+
+  it("throws on probability above PPM", () => {
+    expect(() => computeMultiplier([1_000_001, 500_000])).toThrow("prob out of range");
+  });
+
+  it("throws on negative probability", () => {
+    expect(() => computeMultiplier([-1, 500_000])).toThrow("prob out of range");
   });
 });
 
@@ -262,5 +293,143 @@ describe("parseSimRequest", () => {
       probabilities: [500_000],
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("computeProgressivePayout", () => {
+  it("computes partial payout for won legs", () => {
+    const stake = BigInt(10 * 10 ** USDC_DECIMALS);
+    const potentialPayout = BigInt(40 * 10 ** USDC_DECIMALS);
+    const { partialPayout, claimable } = computeProgressivePayout(
+      stake,
+      [500_000],
+      potentialPayout,
+      0n,
+    );
+    // 1 won leg at 50% => multiplier = 2x => partial = 20 USDC
+    expect(partialPayout).toBe(20_000_000n);
+    expect(claimable).toBe(20_000_000n);
+  });
+
+  it("subtracts already claimed amount", () => {
+    const stake = BigInt(10 * 10 ** USDC_DECIMALS);
+    const potentialPayout = BigInt(40 * 10 ** USDC_DECIMALS);
+    const alreadyClaimed = 5_000_000n;
+    const { partialPayout, claimable } = computeProgressivePayout(
+      stake,
+      [500_000],
+      potentialPayout,
+      alreadyClaimed,
+    );
+    expect(partialPayout).toBe(20_000_000n);
+    expect(claimable).toBe(15_000_000n); // 20 - 5
+  });
+
+  it("caps at potential payout", () => {
+    const stake = BigInt(100 * 10 ** USDC_DECIMALS);
+    const potentialPayout = 5_000_000n; // only 5 USDC cap
+    const { partialPayout } = computeProgressivePayout(
+      stake,
+      [1_000], // very low prob => huge multiplier
+      potentialPayout,
+      0n,
+    );
+    expect(partialPayout).toBe(potentialPayout);
+  });
+
+  it("throws on empty won legs", () => {
+    expect(() =>
+      computeProgressivePayout(10_000_000n, [], 40_000_000n, 0n),
+    ).toThrow("no won legs");
+  });
+});
+
+describe("computeCashoutValue", () => {
+  it("computes cashout with penalty scaled by unresolved legs", () => {
+    const stake = BigInt(10 * 10 ** USDC_DECIMALS);
+    const potentialPayout = BigInt(40 * 10 ** USDC_DECIMALS);
+    const { cashoutValue, penaltyBps, fairValue } = computeCashoutValue(
+      stake,
+      [500_000],     // 1 won leg at 50%
+      2,             // 2 unresolved
+      3,             // totalLegs
+      potentialPayout,
+      1500,          // basePenaltyBps
+    );
+    // fairValue = stake * multiplier(500_000) = 10 * 2 = 20 USDC
+    expect(fairValue).toBe(20_000_000n);
+    // penaltyBps = 1500 * 2 / 3 = 1000
+    expect(penaltyBps).toBe(1000);
+    // cashout = 20_000_000 * (10000 - 1000) / 10000 = 18_000_000
+    expect(cashoutValue).toBe(18_000_000n);
+  });
+
+  it("penaltyBps uses integer division matching Solidity", () => {
+    // Reference values from ParlayMath.t.sol — must match exactly.
+    const stake = BigInt(10 * 10 ** USDC_DECIMALS);
+
+    // basePenaltyBps=1500, unresolvedCount=1, totalLegs=4 => 375
+    const { penaltyBps: penalty1 } = computeCashoutValue(
+      stake, [500_000], 1, 4, 100_000_000n, 1500,
+    );
+    expect(penalty1).toBe(375);
+
+    // basePenaltyBps=1000, unresolvedCount=2, totalLegs=3 => 666
+    const { penaltyBps: penalty2 } = computeCashoutValue(
+      stake, [500_000], 2, 3, 100_000_000n, 1000,
+    );
+    expect(penalty2).toBe(666);
+
+    // basePenaltyBps=1500, unresolvedCount=2, totalLegs=7 => 428
+    // (matches test_computeCashoutValue_nonRound_penalty in ParlayMath.t.sol)
+    const { penaltyBps: penalty3 } = computeCashoutValue(
+      stake, [500_000], 2, 7, 100_000_000n, 1500,
+    );
+    expect(penalty3).toBe(428);
+  });
+
+  it("caps cashoutValue at potentialPayout", () => {
+    const stake = BigInt(100 * 10 ** USDC_DECIMALS);
+    const potentialPayout = 5_000_000n;
+    const { cashoutValue } = computeCashoutValue(
+      stake, [1_000], 1, 3, potentialPayout, 100,
+    );
+    expect(cashoutValue).toBe(potentialPayout);
+  });
+
+  it("throws on empty won legs", () => {
+    expect(() =>
+      computeCashoutValue(10_000_000n, [], 1, 3, 40_000_000n, 1000),
+    ).toThrow("no won legs");
+  });
+
+  it("throws on zero unresolved count", () => {
+    expect(() =>
+      computeCashoutValue(10_000_000n, [500_000], 0, 3, 40_000_000n, 1000),
+    ).toThrow("no unresolved legs");
+  });
+
+  it("throws on zero totalLegs", () => {
+    expect(() =>
+      computeCashoutValue(10_000_000n, [500_000], 1, 0, 40_000_000n, 1000),
+    ).toThrow("zero totalLegs");
+  });
+
+  it("throws on unresolvedCount > totalLegs", () => {
+    expect(() =>
+      computeCashoutValue(10_000_000n, [500_000], 5, 3, 40_000_000n, 1000),
+    ).toThrow("unresolved > total");
+  });
+
+  it("throws on basePenaltyBps > BPS", () => {
+    expect(() =>
+      computeCashoutValue(10_000_000n, [500_000], 1, 3, 40_000_000n, 10_001),
+    ).toThrow("penalty out of range");
+  });
+
+  it("throws on negative basePenaltyBps", () => {
+    expect(() =>
+      computeCashoutValue(10_000_000n, [500_000], 1, 3, 40_000_000n, -1),
+    ).toThrow("penalty out of range");
   });
 });

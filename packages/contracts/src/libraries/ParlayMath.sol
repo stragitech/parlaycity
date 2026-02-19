@@ -53,4 +53,45 @@ library ParlayMath {
     {
         totalBps = baseBps + (numLegs * perLegBps);
     }
+
+    /// @notice Compute the cashout value for an early exit.
+    /// @param effectiveStake The wager amount after fees.
+    /// @param wonProbsPPM Probabilities of already-won legs (each in PPM).
+    /// @param unresolvedCount Number of unresolved legs.
+    /// @param basePenaltyBps Base penalty in bps (scaled by unresolved/total legs).
+    /// @param totalLegs Total number of legs in the ticket.
+    /// @param potentialPayout Maximum payout (cap).
+    /// @return cashoutValue The amount the user receives.
+    /// @return penaltyBps The applied penalty in bps.
+    function computeCashoutValue(
+        uint256 effectiveStake,
+        uint256[] memory wonProbsPPM,
+        uint256 unresolvedCount,
+        uint256 basePenaltyBps,
+        uint256 totalLegs,
+        uint256 potentialPayout
+    ) internal pure returns (uint256 cashoutValue, uint256 penaltyBps) {
+        require(wonProbsPPM.length > 0, "ParlayMath: no won legs");
+        require(totalLegs > 0, "ParlayMath: zero totalLegs");
+        require(unresolvedCount > 0, "ParlayMath: no unresolved legs");
+        require(unresolvedCount <= totalLegs, "ParlayMath: unresolved > total");
+        require(basePenaltyBps <= BPS, "ParlayMath: penalty > 100%");
+
+        // Fair value = expected payout given won legs.
+        // wonMultiplier = 1/product(wonProbs) in PPM; wonValue = stake / product(wonProbs).
+        // This already equals Prob(unresolved win) × fullPayout because the unresolved
+        // probabilities cancel out when deriving EV from won legs alone.
+        // The penalty (below) prices in the risk of unresolved legs.
+        uint256 wonMultiplier = computeMultiplier(wonProbsPPM);
+        uint256 fairValue = computePayout(effectiveStake, wonMultiplier);
+
+        // Apply scaled penalty: more unresolved legs = higher penalty
+        penaltyBps = (basePenaltyBps * unresolvedCount) / totalLegs;
+        cashoutValue = (fairValue * (BPS - penaltyBps)) / BPS;
+
+        // Cap at potential payout
+        if (cashoutValue > potentialPayout) {
+            cashoutValue = potentialPayout;
+        }
+    }
 }
