@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import type { TicketStatus } from "@/components/TicketCard";
 
 /**
@@ -59,4 +60,44 @@ export function parseOutcomeChoice(outcome: `0x${string}`): number {
   } catch {
     return 0;
   }
+}
+
+/**
+ * useState that persists to sessionStorage. SSR-safe: uses defaultValue for
+ * server render, restores from storage on first client effect (avoids hydration
+ * mismatch). Writes are persisted in a post-render effect on value change.
+ */
+export function useSessionState<T>(
+  key: string,
+  defaultValue: T,
+  serialize: (v: T) => string = JSON.stringify,
+  deserialize: (s: string) => T = JSON.parse,
+): [T, (v: T | ((prev: T) => T)) => void] {
+  const [value, setValue] = useState<T>(defaultValue);
+  const [hydrated, setHydrated] = useState(false);
+
+  // Restore from sessionStorage on mount (client only, runs once)
+  useEffect(() => {
+    try {
+      const stored = sessionStorage.getItem(key);
+      if (stored !== null) {
+        setValue(deserialize(stored));
+      }
+    } catch {
+      // sessionStorage unavailable or parse error — keep default
+    }
+    setHydrated(true);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Persist to sessionStorage on change (skip the initial hydration write)
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      sessionStorage.setItem(key, serialize(value));
+    } catch {
+      // storage full or unavailable — silently ignore
+    }
+  }, [key, value, hydrated, serialize]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return [value, setValue];
 }
